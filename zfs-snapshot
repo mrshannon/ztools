@@ -1,0 +1,281 @@
+#!/usr/bin/env python3
+
+import signal
+import re
+import sys
+import argparse
+import datetime
+import time
+import subprocess
+from collections import namedtuple
+
+
+
+def parse_time(string, round_up=False):
+    try:
+        time = datetime.datetime.strptime(string, '%Y-%m-%d')
+        if round_up:
+            time = time + datetime.timedelta(seconds=(3600*24-1))
+    except ValueError:
+        try:
+            time = datetime.datetime.strptime(string, '%Y-%m-%d %H:%M')
+            if round_up:
+                time = time + datetime.timedelta(seconds=59)
+        except ValueError:
+            try:
+                return datetime.datetime.strptime(
+                    string, '%Y-%m-%d %H:%M:%S')
+            except ValueError:
+                # TODO 2020-09-13: Change to formatted string literal.
+                raise argparse.ArgumentTypeError(
+                    'Invalid time "{}"'.format(string))
+    return time
+
+
+def parse_time_after(string):
+    return parse_time(string, round_up=True)
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description=(
+            'Remove multiple ZFS snapshots from a dataset.  Filters '
+            'are applied in the order they are listed in this help '
+            'message.'))
+
+    # common arguments
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument(
+        '-A', '--auto-snap-only', action='store_true',
+        help='select only snapshots created by zfs-auto-snapshot')
+    common.add_argument(
+        '-M', '--manual-snap-only', action='store_true',
+        help='select only snapshots not created by zfs-auto-snapshot')
+    common.add_argument(
+        '-a', '--after', type=parse_time_after, metavar='TIME',
+        help=('select snapshots created after this time, formats: '
+              'YYYY-MM-DD, YYYY-MM-DD hh:mm, YYY-MM-DD hh:mm:ss'))
+    common.add_argument(
+        '-b', '--before', type=parse_time, metavar='TIME',
+        help=('select snapshots created after this time, formats: '
+              'YYYY-MM-DD, YYYY-MM-DD hh:mm, YYY-MM-DD hh:mm:ss'))
+    common.add_argument(
+        '-o', '--oldest', type=int, metavar='N', default=None,
+        help=('select the oldest N snapshots, '
+              'if negative select all but last N snapshots'))
+    common.add_argument(
+        '-n', '--newest', type=int, metavar='N', default=None,
+        help=('select the newest N snapshots, '
+              'if negative select all but first N snapshots'))
+    common.add_argument('dataset')
+
+    # list subcommand
+    subparsers = parser.add_subparsers(
+        title='commands', dest='command',
+        description='Action to take with snapshots.')
+    list_parser = subparsers.add_parser(
+        'list', parents=[common], help='List snapshots.',
+        description='List snapshots.')
+    list_parser.add_argument(
+        '-H', '--no-header', action='store_true',
+        help="don't print headers")
+    list_parser.add_argument(
+        '-p', '--parsable', action='store_true',
+        help=('always print type (as single letter, M/A) and display '
+              'times as UNIX timestamps, implies -H'))
+
+    # destroy subcommand
+    destroy_parser = subparsers.add_parser(
+        'destroy', parents=[common], help='Destroy snapshots.',
+        description='Destroy snapshots.')
+    destroy_parser.add_argument(
+        '-y', '--yes', action='store_true',
+        help="don't ask before removing snapshots")
+    destroy_parser.add_argument(
+        '-v', '--verbose', action='store_true',
+        help='print each snapshot as it is destroyed')
+    destroy_parser.add_argument(
+        '-d', '--dry-run', action='store_true',
+        help=('print the command used to destroy the snapshot, '
+              'but do not execute it'))
+    # TODO: Add recursive functionality.
+
+    args = vars(parser.parse_args())
+    if args['parsable']:
+        args['no_header'] = True
+    return args
+
+
+def verify_dataset_name(dataset):
+    if not re.match(r'^[\w_\-/]*$', dataset) or not dataset:
+        raise ValueError("Invalid dataset '{}'".format(dataset))
+
+
+def verify_snapshot_name(snapshot):
+    if not re.match(r'^[\w_\-/]*$', snapshot) or not snapshot:
+        raise ValueError("Invalid snapshot '{}'".format(snapshot))
+
+
+def list_snapshots(dataset):
+    verify_dataset_name(dataset)
+    args = ['zfs', 'list', '-p', '-H', '-t', 'snapshot',
+            '-o', 'name,creation', '-s', 'creation', '-d', '1', dataset]
+    result = subprocess.run(
+        args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if result.returncode != 0:
+        # TODO 2020-09-13: Change to formatted string literal.
+        raise ValueError("Invalid dataset '{}'".format(dataset))
+    fields = re.compile(r'[^@]*@(\S*)\s*(\d*)')
+    Snapshot = namedtuple('Snapshot', ('name', 'creation', 'auto'))
+    snapshots = []
+    for line in result.stdout.decode('utf-8').splitlines():
+        name, time = fields.match(line).groups()
+        time = datetime.datetime.fromtimestamp(int(time))
+        auto_snap = name.startswith('zfs-auto-snap')
+        snapshots.append(Snapshot(name, time, auto_snap))
+    return snapshots
+
+
+def yes_or_no(question):
+    reply = str(input(question+' (y/N): ')).lower().strip()
+    try:
+        if reply[0].lower() == 'y':
+            return True
+    except IndexError:
+        pass
+    return False
+
+
+def destroy_snapshot(
+        dataset, snapshot, ask=True, verbose=False, dry_run=False):
+    verify_dataset_name(dataset)
+    verify_snapshot_name(snapshot.name)
+    snap = dataset + '@' + snapshot.name
+    if not dataset:
+        raise ValueError('No dataset specified.')
+    if ask:
+        # TODO 2020-09-13: Change to formatted string literal.
+        if not yes_or_no("Destroy snapshot {:s}?".format(snap)):
+            return
+    if verbose:
+        # TODO 2020-09-13: Change to formatted string literal.
+        print('Destroyed {:s}'.format(snap))
+    args = ['zfs', 'destroy', snap]
+    if dry_run:
+        print(' '.join(args))
+    else:
+        result = subprocess.run(args, stderr=subprocess.PIPE)
+        if result.returncode:
+            # TODO 2020-09-13: Change to formatted string literal.
+            print('Could not destroy {:s}:\n    {:}'.format(
+                snap, result.stderr.decode('utf-8').rstrip()))
+
+
+def print_snapshot(snapshot, skip_type=False, parsable=False):
+    verify_snapshot_name(snapshot.name)
+    if parsable:
+        date = str(int(time.mktime(snapshot.creation.timetuple())))
+    else:
+        date = str(snapshot.creation)
+    if skip_type:
+        # TODO 2020-09-13: Change to formatted string literal.
+        print("{:s}    {:s}".format(date, snapshot.name))
+    else:
+        if parsable:
+            auto = 'A' if snapshot.auto else 'M'
+            print("{:s}  {:s}  {:s}".format(
+                auto, date, snapshot.name))
+        else:
+            auto = 'Auto' if snapshot.auto else 'Manual'
+            # TODO 2020-09-13: Change to formatted string literal.
+            print("{:6s}    {:s}    {:s}".format(
+                auto, date, snapshot.name))
+
+
+def print_snapshot_header(skip_type=False):
+    if skip_type:
+        print('CREATED                NAME')
+    else:
+        print('TYPE      CREATED                NAME')
+
+
+def main():
+    args = parse_args()
+    # print(args)
+    # sys.exit(0)
+    if not args['dataset']:
+        print('Missing dataset name.', file=sys.stderr)
+        sys.exit(2)
+
+    try:
+        snapshots = list_snapshots(args['dataset'])
+    except ValueError as err:
+        print(err, file=sys.stderr)
+        sys.exit(1)
+    no_type = not args['parsable'] and (
+        args['manual_snap_only'] or args['auto_snap_only'])
+    if args['command'] == 'list':
+        def action(snapshot):
+            print_snapshot(snapshot, no_type, args['parsable'])
+        if not args['no_header']:
+            print_snapshot_header(no_type)
+    elif args['command'] == 'destroy':
+        def action(snapshot):
+            destroy_snapshot(
+                args['dataset'], snapshot,
+                not args['yes'], args['verbose'], args['dry_run'])
+
+    # auto filter
+    if args['auto_snap_only']:
+        snapshots = [snap for snap in snapshots if snap.auto]
+
+    # manual filter
+    if args['manual_snap_only']:
+        snapshots = [snap for snap in snapshots if not snap.auto]
+
+    # before filter
+    if args['before']:
+        snapshots = [
+            snap for snap in snapshots
+            if snap.creation < args['before']]
+
+    # after filter
+    if args['after']:
+        snapshots = [
+            snap for snap in snapshots
+            if snap.creation > args['after']]
+
+    # oldest filter
+    if args['oldest'] is not None:
+        if args['oldest'] > 0:
+            snapshots = snapshots[:args['oldest']]
+        elif args['oldest'] == 0:
+            snapshots = []
+        elif args['oldest'] < 0:
+            snapshots = snapshots[:args['oldest']]
+
+    # newest filter
+    if args['newest'] is not None:
+        if args['newest'] > 0:
+            snapshots = snapshots[-args['newest']:]
+        elif args['newest'] == 0:
+            snapshots = []
+        elif args['newest'] < 0:
+            snapshots = snapshots[-args['newest']:]
+
+    # perform action
+    for snapshot in snapshots:
+        if not snapshot.name:
+            print('Missing snapshot name.', file=sys.stderr)
+            sys.exit(2)
+        action(snapshot)
+
+
+def ctrl_c(signal, frame):
+    print('\nExiting...')
+    sys.exit(0)
+
+
+if __name__ == '__main__':
+    signal.signal(signal.SIGINT, ctrl_c)
+    main()
