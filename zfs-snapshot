@@ -89,6 +89,9 @@ def parse_args():
         'destroy', parents=[common], help='Destroy snapshots.',
         description='Destroy snapshots.')
     destroy_parser.add_argument(
+        '-k', '--keep', action='store_true',
+        help="keep the selected snapshots and remove all others")
+    destroy_parser.add_argument(
         '-y', '--yes', action='store_true',
         help="don't ask before removing snapshots")
     destroy_parser.add_argument(
@@ -101,8 +104,11 @@ def parse_args():
     # TODO: Add recursive functionality.
 
     args = vars(parser.parse_args())
-    if args['parsable']:
-        args['no_header'] = True
+    try:
+        if args['parsable']:
+            args['no_header'] = True
+    except KeyError:
+        pass
     return args
 
 
@@ -212,7 +218,7 @@ def main():
     except ValueError as err:
         print(err, file=sys.stderr)
         sys.exit(1)
-    no_type = not args['parsable'] and (
+    no_type = not args.get('parsable', False) and (
         args['manual_snap_only'] or args['auto_snap_only'])
     if args['command'] == 'list':
         def action(snapshot):
@@ -224,6 +230,8 @@ def main():
             destroy_snapshot(
                 args['dataset'], snapshot,
                 not args['yes'], args['verbose'], args['dry_run'])
+
+    all_snapshots = snapshots
 
     # auto filter
     if args['auto_snap_only']:
@@ -262,6 +270,13 @@ def main():
             snapshots = []
         elif args['newest'] < 0:
             snapshots = snapshots[-args['newest']:]
+
+    # reverse selection
+    if args.get('keep', False):
+        snapshots = [
+            snap
+            for snap in all_snapshots
+            if snap not in snapshots]
 
     # perform action
     for snapshot in snapshots:
