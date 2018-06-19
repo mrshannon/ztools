@@ -10,7 +10,6 @@ import subprocess
 from collections import namedtuple
 
 
-
 def parse_time(string, round_up=False):
     try:
         time = datetime.datetime.strptime(string, '%Y-%m-%d')
@@ -113,12 +112,12 @@ def parse_args():
 
 
 def verify_dataset_name(dataset):
-    if not re.match(r'^[\w_\-/]*$', dataset) or not dataset:
+    if not re.match(r'^[\w_\-/\.]*$', dataset) or not dataset:
         raise ValueError("Invalid dataset '{}'".format(dataset))
 
 
 def verify_snapshot_name(snapshot):
-    if not re.match(r'^[\w_\-/]*$', snapshot) or not snapshot:
+    if not re.match(r'^[\w_\-/\.]*$', snapshot) or not snapshot:
         raise ValueError("Invalid snapshot '{}'".format(snapshot))
 
 
