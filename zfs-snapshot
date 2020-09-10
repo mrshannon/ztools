@@ -117,7 +117,7 @@ def verify_dataset_name(dataset):
 
 
 def verify_snapshot_name(snapshot):
-    if not re.match(r'^[\w_\-/\.]*$', snapshot) or not snapshot:
+    if not re.match(r'^[\w_\-\.]*$', snapshot) or not snapshot:
         raise ValueError("Invalid snapshot '{}'".format(snapshot))
 
 
